@@ -12,6 +12,10 @@ bool ListenerMethod::EndRun(Object^ target, array<Object^>^ args, Object^ result
 {
 	return true;
 }
+bool ListenerMethod::Exception(Object^ target, array<Object^>^ args, System::Exception^ ex)
+{
+	return false;
+}
 //class ListenerField
 //public
 bool ListenerField::PreGet(Object^ target, String^ fieldname)
@@ -48,6 +52,10 @@ bool ListenerProperty::EndSet(Object^ target, String^ propertyname, array<Object
 {
 	return true;
 }
+bool ListenerProperty::Exception(Object^ target, String^ propertyname, array<Object^>^ param, Object^ value, System::Exception^ ex)
+{
+	return false;
+}
 //class MonitorAttribute
 //private
 IMessageSink^ ListenerAttribute::GetServerContextSink(IMessageSink^ nextSink)
@@ -75,6 +83,11 @@ bool ListenerAttribute::Sink::MethodEndRun(array<ListenerMethod^>^ list, array<O
 {
 	for (int i = list->Length - 1; i >= 0; i--) if (!list[i]->EndRun(this->_listener->_this, args, result)) return false;
 	return true;
+}
+bool ListenerAttribute::Sink::MethodException(array<ListenerMethod^>^ list, array<Object^>^ args, Exception^ ex)
+{
+	for (int i = list->Length - 1; i >= 0; i--) if (list[i]->Exception(this->_listener->_this, args, ex)) return true;
+	return false;
 }
 bool  ListenerAttribute::Sink::FieldPreGet(array<ListenerField^>^ list, String^ fieldname)
 {
@@ -120,6 +133,12 @@ bool ListenerAttribute::Sink::PropertyEndSet(array<ListenerProperty^>^ list, Str
 	for (int i = list->Length - 1; i >= 0; i--) if (!list[i]->EndSet(this->_listener->_this, propertyname, param, value)) return false;
 	return true;
 }
+bool ListenerAttribute::Sink::PropertyException(array<ListenerProperty^>^ list, String^ propertyname, array<Object^>^ param, Object^ value, Exception^ex)
+{
+	if (propertyname == "Item" && param->Length > 0) propertyname = "this";
+	for (int i = list->Length - 1; i >= 0; i--) if (list[i]->Exception(this->_listener->_this, propertyname, param, value, ex)) return true;
+	return false;
+}
 IMessageSink^ ListenerAttribute::Sink::NextSink::get()
 {
 	return this->_nextSink;
@@ -142,7 +161,12 @@ IMessage^ ListenerAttribute::Sink::SyncProcessMessage(IMessage^ msg)
 			array<ListenerMethod^>^ list = (array<ListenerMethod^>^)ci->GetCustomAttributes(ListenerMethod::typeid, true);
 			if (!this->MethodPreRun(list, Args)) return nullptr;
 			retMsg = this->_nextSink->SyncProcessMessage(msg);
-			if (!this->MethodEndRun(list, (array<Object^>^)retMsg->Properties["__OutArgs"], retMsg->Properties["__Return"])) return nullptr;
+			if (retMsg->Properties->Contains("__Return")) { if (!this->MethodEndRun(list, (array<Object^>^)retMsg->Properties["__OutArgs"], retMsg->Properties["__Return"])) return nullptr; }
+			else
+			{
+				IMethodReturnMessage^ rm = dynamic_cast<IMethodReturnMessage^>(retMsg);
+				if (this->MethodException(list, Args, rm->Exception)) return gcnew ReturnMessage(nullptr, Args, rm->OutArgCount, rm->LogicalCallContext, nullptr);
+			}
 		}
 		else if (MethodName == "FieldGetter" && TypeName != this->_typename)
 		{
@@ -173,7 +197,7 @@ IMessage^ ListenerAttribute::Sink::SyncProcessMessage(IMessage^ msg)
 				plist = (array<ListenerProperty^>^)pi->GetCustomAttributes(ListenerProperty::typeid, true);
 				if (plist->Length > 0)
 				{
-					if (arr[0] == "get") if (!this->PropertyPreGet(plist, arr[1], Args)) return nullptr;
+					if (arr[0] == "get" && !this->PropertyPreGet(plist, arr[1], Args)) return nullptr;
 					else if (arr[0] == "set")
 					{
 						int len = Args->Length - 1;
@@ -187,13 +211,13 @@ IMessage^ ListenerAttribute::Sink::SyncProcessMessage(IMessage^ msg)
 			array<ListenerMethod^>^ mlist = (array<ListenerMethod^>^)mi->GetCustomAttributes(ListenerMethod::typeid, true);
 			if (!this->MethodPreRun(mlist, Args)) return nullptr;
 			retMsg = this->_nextSink->SyncProcessMessage(msg);
-			Object^ result = retMsg->Properties["__Return"];
-			Args = (array<Object^>^)retMsg->Properties["__OutArgs"];
-			if (pi != nullptr)
+			if (retMsg->Properties->Contains("__Return"))
 			{
-				if (plist->Length > 0)
+				Object^ result = retMsg->Properties["__Return"];
+				Args = (array<Object^>^)retMsg->Properties["__OutArgs"];
+				if (pi != nullptr && plist->Length > 0)
 				{
-					if (arr[0] == "get") if (!this->PropertyEndGet(plist, arr[1], Args, result)) return nullptr;
+					if (arr[0] == "get" && !this->PropertyEndGet(plist, arr[1], Args, result)) return nullptr;
 					else if (arr[0] == "set")
 					{
 						int len = Args->Length - 1;
@@ -202,8 +226,37 @@ IMessage^ ListenerAttribute::Sink::SyncProcessMessage(IMessage^ msg)
 						if (!this->PropertyEndSet(plist, arr[1], param, Args[len])) return nullptr;
 					}
 				}
+				if (!this->MethodEndRun(mlist, Args, result)) return nullptr;
 			}
-			if (!this->MethodEndRun(mlist, Args, result)) return nullptr;
+			else
+			{
+				IMethodReturnMessage^ rm = dynamic_cast<IMethodReturnMessage^>(retMsg);
+				Exception^ ex = rm->Exception;
+				if (pi != nullptr && plist->Length > 0)
+				{
+					if (arr[0] == "get" && this->PropertyException(plist, arr[1], Args, nullptr, ex))
+					{
+						Object^ result;
+						T = mi->ReturnType;
+						if (T->IsValueType) result = Activator::CreateInstance(T);
+						return gcnew ReturnMessage(result, Args, rm->OutArgCount, rm->LogicalCallContext, nullptr);
+					}
+					else if (arr[0] == "set")
+					{
+						int len = Args->Length - 1;
+						array<Object^>^ param = gcnew array<Object^>(len);
+						if (len > 0) Array::Copy(Args, param, len);
+						if (this->PropertyException(plist, arr[1], param, Args[len], ex)) return gcnew ReturnMessage(nullptr, Args, rm->OutArgCount, rm->LogicalCallContext, nullptr);
+					}
+				}
+				if (mlist->Length > 0 && this->MethodException(mlist, Args, ex))
+				{
+					Object^ result;
+					T = mi->ReturnType;
+					if (T->IsValueType) result = Activator::CreateInstance(T);
+					return gcnew ReturnMessage(result, Args, rm->OutArgCount, rm->LogicalCallContext, nullptr);
+				}
+			}
 		}
 		return retMsg;
 	}
