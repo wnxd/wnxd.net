@@ -213,7 +213,8 @@ IMessage^ ListenerAttribute::Sink::SyncProcessMessage(IMessage^ msg)
 			retMsg = this->_nextSink->SyncProcessMessage(msg);
 			if (retMsg->Properties->Contains("__Return"))
 			{
-				Object^ result = retMsg->Properties["__Return"];
+				Object^ result;
+				if (mi->ReturnType == void::typeid) result = retMsg->Properties["__Return"];
 				Args = (array<Object^>^)retMsg->Properties["__OutArgs"];
 				if (pi != nullptr && plist->Length > 0)
 				{
